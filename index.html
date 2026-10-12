@@ -1567,7 +1567,7 @@ function handleFile(file) {
         const _rows = xml.split('</w:tr>').length - 1;
         const hesiQs = parseHesiDocx(xml);
         if (hesiQs.length) {
-          loadQuestions(hesiQs, file.name + ' [debug: xml=' + Math.round(xml.length/1024) + 'KB rows=' + _rows + ']'); _uploadDocToStorage(file, hesiQs);
+          loadQuestions(hesiQs, file.name); _uploadDocToStorage(file, hesiQs);
         } else {
           const qs = parseTxt(docxToText(xml));
           qs.length ? (loadQuestions(qs, file.name), _uploadDocToStorage(file, qs)) : setStatus('Could not parse questions from DOCX.', false);
@@ -1689,7 +1689,7 @@ function parseHesiDocx(xml) {
     .replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>')
     .replace(/&apos;/g,"'").replace(/&quot;/g,'"');
 
-  const tRe = /<w:t[^>]*>([\s\S]*?)<\/w:t>/g;
+  const tRe = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g;
 
   function cellTexts(row) {
     // Grab ONLY the first <w:tc>…</w:tc> block to stay within one cell
@@ -1762,10 +1762,6 @@ function parseHesiDocx(xml) {
       answer: answerIdx >= 0 ? LETTERS[answerIdx] + '. ' + answerText : '',
       explanation: rationale
     });
-  }
-  // Visible debug: Q1 question text shows xml size + row count + parse count
-  if (qs.length > 0) {
-    qs[0].question = '[V12 xml=' + Math.round(xml.length/1024) + 'KB rows=' + rows.length + ' parsed=' + qs.length + '] ' + qs[0].question;
   }
   return qs;
 }
