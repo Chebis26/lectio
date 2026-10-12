@@ -1694,7 +1694,7 @@ function parseHesiDocx(xml) {
   function cellTexts(row) {
     // Grab ONLY the first <w:tc>…</w:tc> block to stay within one cell
     const tcS = row.indexOf('<w:tc');
-    const tcE = row.lastIndexOf('</w:tc>');
+    const tcE = row.indexOf('</w:tc>', tcS);
     if (tcS < 0 || tcE < 0) return [];
     const tc = row.slice(tcS, tcE + 7);
     return tc.split('</w:p>').slice(0, -1).map(pc => {
@@ -1718,10 +1718,12 @@ function parseHesiDocx(xml) {
 
   for (const row of rows) {
     const paras = cellTexts(row);
-    if (paras.length < 5) continue;
+    if (paras.length < 3) continue;
 
-    const rawChoices = paras.slice(-4);
-    const questionParas = paras.slice(0, -4);
+    // Use up to 4 trailing paragraphs as choices; always keep at least 1 for question text
+    const numChoices = Math.min(4, paras.length - 1);
+    const rawChoices = paras.slice(-numChoices);
+    const questionParas = paras.slice(0, paras.length - numChoices);
 
     const choices = rawChoices.map((raw, i) => {
       const m2 = ratRE.exec(raw);
