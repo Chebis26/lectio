@@ -1807,10 +1807,14 @@ function pptxSlideToText(xml) {
 }
 
 
-// PDF.js worker (served from same CDN)
+// PDF.js worker — fetch and create a blob URL to avoid cross-origin worker restrictions
+// (required on GitHub Pages and other hosted environments)
 if (typeof pdfjsLib !== 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const _workerCdnUrl = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  fetch(_workerCdnUrl)
+    .then(r => r.blob())
+    .then(b => { pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(b); })
+    .catch(() => { pdfjsLib.GlobalWorkerOptions.workerSrc = _workerCdnUrl; });
 }
 
 async function pdfToTextAsync(arrayBuffer) {
