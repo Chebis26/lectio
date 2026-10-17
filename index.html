@@ -2127,6 +2127,9 @@ function parseGeneralPdf(raw) {
       explanation: rationale
     });
   }
+  if (qs.length > 3 && qs[0]) {
+    qs[0].question = '[DBG markers=' + markers.length + ' found=' + qs.length + '] ' + qs[0].question;
+  }
   return qs.length > 3 ? qs : null;
 }
 
