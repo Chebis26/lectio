@@ -2041,54 +2041,59 @@ function parseHesiPdf(raw) {
 }
 
 // General PDF parser for inline-choice format:
-// "[Question?] A. choice B. choice C. choice D. choice [Letter] Rationale: explanation"
+// "[Question?] A. choice B. choice C. choice D. [E. choice] [Letter(s)] Rationale: explanation"
+// Handles A-D and A-E choices, single-letter and SATA (e.g. "B, C") answers.
 function parseGeneralPdf(raw) {
   // Fix PDF hyphenation artifacts ("med- ication" → "medication")
   let text = raw.replace(/(\w)-[ \t]+(\w)/g, '$1$2');
 
-  // Anchor on "[A-D][.]? Rationale:" — letter (with optional period) then Rationale
-  // Handles both "C Rationale:" and "C. Rationale:"
-  const ansRE = /\b([A-D])\.?\s+Rational?e?\s*:/gi;
+  // Strip common PDF title/boilerplate that appears at the top
+  text = text.replace(/HESI\s+RN\s+\w[\s\S]{0,200}?(?:VERIFIED\s+AN(?:-?\s*SWERS?)?)\s*/gi, '');
+
+  // Anchor on "[A-E][,A-E]* [.]? Rationale:" — single or SATA answer before Rationale
+  // Matches: "C Rationale:", "C. Rationale:", "B, C Rationale:", "B, C, D Rationale:"
+  const ansRE = /\b([A-E](?:[,\s]+[A-E])*)\.?\s+Rational?e?\s*:/gi;
   const markers = [];
   let am;
   while ((am = ansRE.exec(text)) !== null)
-    markers.push({ idx: am.index, letter: am[1].toUpperCase(), len: am[0].length });
+    markers.push({ idx: am.index, letters: am[1].replace(/[\s,]+/g,'').toUpperCase(), len: am[0].length });
   if (markers.length < 3) return null;
 
-  // Helper: find the start of the LAST A→B→C→D choice sequence in a block
+  // Find the start of the LAST A→B→C→D(→E) sequence in a block
   function findLastChoiceStart(block) {
     const aPat = /\bA\.\s+[A-Z\d]/g;
-    const aPositions = [];
+    const aPos = [];
     let aM;
-    while ((aM = aPat.exec(block)) !== null) aPositions.push(aM.index);
-    // Try from last to first — return the last A. that has B. C. D. after it
-    for (let ai = aPositions.length - 1; ai >= 0; ai--) {
-      const sub = block.slice(aPositions[ai]);
+    while ((aM = aPat.exec(block)) !== null) aPos.push(aM.index);
+    for (let ai = aPos.length - 1; ai >= 0; ai--) {
+      const sub = block.slice(aPos[ai]);
       if (/\bA\.\s+[\s\S]+?\bB\.\s+[\s\S]+?\bC\.\s+[\s\S]+?\bD\.\s+/.test(sub))
-        return aPositions[ai];
+        return aPos[ai];
     }
     return -1;
   }
+
+  const cleanBlock = s => s
+    .replace(/\d+\s*\/\s*\d+\s+[A-Z][A-Z &\-]+(?:EXAM|QUESTIONS|ANSWERS)[^\n]*/gi, ' ')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/Study online at[^.]+\./gi, '')
+    .trim();
 
   const qs = [];
   for (let mi = 0; mi < markers.length; mi++) {
     const mk = markers[mi];
     const prevEnd = mi > 0 ? markers[mi-1].idx + markers[mi-1].len : 0;
-    const block = text.slice(prevEnd, mk.idx)
-      .replace(/\d+\s*\/\s*\d+\s+[A-Z][A-Z &]+(?:EXAM|QUESTIONS|ANSWERS)[^\n]*/gi, ' ')
-      .replace(/https?:\/\/\S+/g, '')
-      .replace(/Study online at[^.]+\./gi, '')
-      .trim();
+    const block = cleanBlock(text.slice(prevEnd, mk.idx));
 
-    // Find the last valid A→B→C→D sequence in block
     const choiceStart = findLastChoiceStart(block);
     if (choiceStart < 0) continue;
 
     const choicesBlock = block.slice(choiceStart);
-    const cm = /\bA\.\s+([\s\S]+?)\s+\bB\.\s+([\s\S]+?)\s+\bC\.\s+([\s\S]+?)\s+\bD\.\s+([\s\S]+)$/.exec(choicesBlock);
+
+    // Match A-D (required) and optional E
+    const cm = /\bA\.\s+([\s\S]+?)\s+\bB\.\s+([\s\S]+?)\s+\bC\.\s+([\s\S]+?)\s+\bD\.\s+([\s\S]+?)(?:\s+\bE\.\s+([\s\S]+))?$/.exec(choicesBlock);
     if (!cm) continue;
 
-    // Question = block before choices; strip any leading rationale from prev question
     const preChoices = block.slice(0, choiceStart);
     const lastQ = preChoices.lastIndexOf('?');
     const questionText = (lastQ >= 0
@@ -2102,19 +2107,23 @@ function parseGeneralPdf(raw) {
       { letter:'C', text: cm[3].trim() },
       { letter:'D', text: cm[4].trim() }
     ];
+    if (cm[5]) choices.push({ letter:'E', text: cm[5].trim() });
 
-    // Rationale: text after answer marker, capped at 500 chars
+    // Build answer string (handles SATA: "BC" → "B, C")
+    const ansLetters = mk.letters.split('');
+    const ansText = ansLetters.map(l => {
+      const c = choices.find(ch => ch.letter === l);
+      return c ? l + '. ' + c.text : l;
+    }).join(' | ');
+
     const nextMk = markers[mi+1];
     const ratEnd = nextMk ? nextMk.idx : Math.min(text.length, mk.idx + mk.len + 500);
-    const rationale = text.slice(mk.idx + mk.len, ratEnd)
-      .replace(/\d+\s*\/\s*\d+\s+[A-Z &]+(?:EXAM|QUESTIONS)[^\n]*/gi, '')
-      .trim().slice(0, 450);
+    const rationale = cleanBlock(text.slice(mk.idx + mk.len, ratEnd)).slice(0, 450);
 
-    const ansChoice = choices.find(c => c.letter === mk.letter);
     qs.push({
       exam: 'Exam', num: qs.length + 1,
       question: questionText, choices,
-      answer: ansChoice ? mk.letter + '. ' + ansChoice.text : mk.letter,
+      answer: ansText,
       explanation: rationale
     });
   }
