@@ -2051,8 +2051,8 @@ function parseGeneralPdf(raw) {
   text = text.replace(/HESI\s+RN\s+\w[\s\S]{0,200}?(?:VERIFIED\s+AN(?:-?\s*SWERS?)?)\s*/gi, '');
 
   // Anchor on "[A-E][,A-E]* [.]? Rationale:" — single or SATA answer before Rationale
-  // Matches: "C Rationale:", "C. Rationale:", "B, C Rationale:", "B, C, D Rationale:"
-  const ansRE = /\b([A-E](?:[,\s]+[A-E])*)\.?\s+Rational?e?\s*:/gi;
+  // Broad Ratio\w+ matches misspellings: "Rationale", "Ratioanle", "Ratioanles", "Rational"
+  const ansRE = /\b([A-E](?:[,\s]+[A-E])*)\.?\s+Ratio\w{1,7}\s*:/gi;
   const markers = [];
   let am;
   while ((am = ansRE.exec(text)) !== null)
