@@ -2040,152 +2040,185 @@ function parseHesiPdf(raw) {
   return qs.length > 10 ? qs : null;
 }
 
-// General PDF parser — tries two strategies, returns the one with more questions.
-// Strategy 1 (Ratio-anchored): works when "X Rationale:" follows each answer.
-// Strategy 2 (Number-anchored): splits on "N)" question numbers, finds answer within each chunk.
+// Universal PDF parser for exam questions.
+// Strategy A: split by question numbers (N) / N. / Question N) — most reliable.
+// Strategy B: fallback Ratio-anchored (for Quizlet-style PDFs without numbering).
 function parseGeneralPdf(raw) {
-  let text = raw.replace(/(\w)-[ \t]+(\w)/g, '$1$2');
-  text = text.replace(/HESI\s+RN\s+\w[\s\S]{0,200}?(?:VERIFIED\s+AN(?:-?\s*SWERS?)?)\s*/gi, '');
+  let text = raw.replace(/(\w)-[ \t]+(\w)/g, '$1$2'); // fix PDF hyphenation
+  text = text.replace(/\r\n/g, '\n');
+  text = text.replace(/Study online at[^.\n]+[.\n]/gi, ' ');
+  text = text.replace(/https?:\/\/\S+/g, ' ');
 
-  // Find the start of the LAST A→B→C→D(→E) sequence in a block
-  function findLastChoiceStart(block) {
-    const aPat = /\bA\.\s+[A-Z\d]/g;
+  // ── Shared helpers ──────────────────────────────────────────────────────────
+
+  // Find the last A→B→C→D start position in a block.
+  // Supports "A." "A)" and "(A)" choice formats.
+  function findChoiceStart(block) {
+    const aPat = /\b(?:A[.)]\s+[A-Z\d(]|\(A\)\s+[A-Z])/g;
     const aPos = [];
-    let aM;
-    while ((aM = aPat.exec(block)) !== null) aPos.push(aM.index);
+    let m;
+    while ((m = aPat.exec(block)) !== null) aPos.push(m.index);
     for (let ai = aPos.length - 1; ai >= 0; ai--) {
       const sub = block.slice(aPos[ai]);
-      if (/\bA\.\s+[\s\S]+?\bB\.\s+[\s\S]+?\bC\.\s+[\s\S]+?\bD\.\s+/.test(sub))
+      if (/\bA[.)]\s+[\s\S]+?\bB[.)]\s+[\s\S]+?\bC[.)]\s+[\s\S]+?\bD[.)]\s+/.test(sub) ||
+          /\(A\)\s+[\s\S]+?\(B\)\s+[\s\S]+?\(C\)\s+[\s\S]+?\(D\)\s+/.test(sub))
         return aPos[ai];
     }
     return -1;
   }
 
-  const cleanBlock = s => s
-    .replace(/\d+\s*\/\s*\d+\s+[A-Z][A-Z &\-]+(?:EXAM|QUESTIONS|ANSWERS)[^\n]*/gi, ' ')
-    .replace(/https?:\/\/\S+/g, '')
-    .replace(/Study online at[^.]+\./gi, '')
-    .trim();
-
-  // Extract choices A-D (and optional E) from a bounded choices string (no $ anchor)
-  function extractChoices(choicesBlock) {
-    return /\bA\.\s+([\s\S]+?)\s+\bB\.\s+([\s\S]+?)\s+\bC\.\s+([\s\S]+?)\s+\bD\.\s+([\s\S]+?)(?:\s+\bE\.\s+([\s\S]+?))?\s*$/.exec(choicesBlock);
+  // Extract A-D (+optional E) choices from a bounded block (no trailing $)
+  function extractChoices(block) {
+    return (
+      /\bA[.)]\s+([\s\S]+?)\s+\bB[.)]\s+([\s\S]+?)\s+\bC[.)]\s+([\s\S]+?)\s+\bD[.)]\s+([\s\S]+?)(?:\s+\bE[.)]\s+([\s\S]+?))?\s*$/.exec(block) ||
+      /\(A\)\s+([\s\S]+?)\s+\(B\)\s+([\s\S]+?)\s+\(C\)\s+([\s\S]+?)\s+\(D\)\s+([\s\S]+?)(?:\s+\(E\)\s+([\s\S]+?))?\s*$/.exec(block)
+    );
   }
 
-  function buildAnswerText(letters, choices) {
+  // Detect answer letter(s) in post-choices text. Returns { letters, match } or null.
+  function detectAnswer(seg) {
+    const pats = [
+      /\bANS(?:WER)?\s*[:\-]\s*([A-E](?:[,\s]*[A-E])*)/i,
+      /(?:Correct\s+)?Answer\s*[:\-]\s*([A-E](?:[,\s]*[A-E])*)/i,
+      /\b([A-E](?:[,\s]+[A-E])*)\s+(?:Ratio\w{1,7}|Explanation)\s*:/i,
+      /(?:^|\n)\s*([A-E](?:[,\s]+[A-E])*)[.\s]*(?:\n|$)/m,
+    ];
+    for (const pat of pats) {
+      const m = pat.exec(seg);
+      if (m && m[1]) return { letters: m[1].replace(/[\s,]+/g,'').toUpperCase(), match: m };
+    }
+    return null;
+  }
+
+  function buildAnswer(letters, choices) {
     return letters.split('').map(l => {
       const c = choices.find(ch => ch.letter === l);
       return c ? l + '. ' + c.text : l;
     }).join(' | ');
   }
 
-  // ── Strategy 1: Ratio-anchored ──────────────────────────────────────────────
+  function cleanChunk(s) {
+    return s
+      .replace(/\d+\s*\/\s*\d+\s+[A-Z][A-Z &\-]+(?:EXAM|QUESTIONS|ANSWERS)[^\n]*/gi, ' ')
+      .replace(/\s{3,}/g, '  ')
+      .trim();
+  }
+
+  // Find the longest consecutive run in an array of { num } splits (starting ≤ 5)
+  function consecutiveRun(splits) {
+    let best = [];
+    for (let i = 0; i < splits.length; i++) {
+      if (splits[i].num > 5) continue;
+      const run = [splits[i]];
+      for (let j = i + 1; j < splits.length && run.length < 500; j++) {
+        const expected = run[run.length - 1].num + 1;
+        if (splits[j].num === expected) { run.push(splits[j]); }
+        else if (splits[j].num < expected) { continue; } // dup, skip
+        else if (splits[j].num === expected + 1) { run.push(splits[j]); } // 1-gap tolerated
+        else break;
+      }
+      if (run.length > best.length) best = run;
+    }
+    return best;
+  }
+
+  // Process a consecutive sequence of splits into question objects
+  function processChunks(seq) {
+    const qs = [];
+    for (let si = 0; si < seq.length; si++) {
+      const chunkStart = seq[si].contentStart;
+      const rawEnd = si + 1 < seq.length ? seq[si + 1].contentStart - seq[si + 1].num.toString().length - 3 : text.length;
+      const chunk = cleanChunk(text.slice(chunkStart, Math.max(chunkStart + 20, rawEnd)));
+
+      const ansResult = detectAnswer(chunk);
+      if (!ansResult) continue;
+
+      const preAns = chunk.slice(0, ansResult.match.index);
+      const choiceStart = findChoiceStart(preAns);
+      if (choiceStart < 0) continue;
+
+      const cm = extractChoices(preAns.slice(choiceStart));
+      if (!cm) continue;
+
+      const preChoices = preAns.slice(0, choiceStart);
+      const lastQ = preChoices.lastIndexOf('?');
+      let qText = (lastQ >= 0 ? preChoices.slice(Math.max(0, lastQ - 1000), lastQ + 1) : preChoices).trim();
+      qText = qText.replace(/^\d+[).]\s*/, '').trim();
+      if (qText.length < 10) continue;
+
+      const choices = [
+        { letter:'A', text: cm[1].trim() }, { letter:'B', text: cm[2].trim() },
+        { letter:'C', text: cm[3].trim() }, { letter:'D', text: cm[4].trim() },
+      ];
+      if (cm[5]) choices.push({ letter:'E', text: cm[5].trim() });
+
+      const afterAns = chunk.slice(ansResult.match.index + ansResult.match[0].length);
+      const ratM = /(?:Ratio\w{1,7}|Explanation)\s*:/i.exec(afterAns);
+      const rationale = ratM
+        ? afterAns.slice(ratM.index + ratM[0].length, ratM.index + 500).trim()
+        : afterAns.slice(0, 400).trim();
+
+      qs.push({ exam:'Exam', num: qs.length + 1, question: qText, choices,
+        answer: buildAnswer(ansResult.letters, choices), explanation: rationale });
+    }
+    return qs;
+  }
+
+  // ── Strategy A: Question-number splitting ──────────────────────────────────
+  const numPatterns = [
+    /(?:^|\n)[ \t]*(\d{1,3})[)]\s+/gm,
+    /(?:^|\n)[ \t]*(\d{1,3})[.]\s+(?=[A-Z\(])/gm,
+    /(?:^|\n)[ \t]*(?:Q(?:uestion)?\s*)(\d{1,3})[.):\s]/gmi,
+  ];
+
+  let bestResult = [];
+  for (const re of numPatterns) {
+    re.lastIndex = 0;
+    const splits = [];
+    let m;
+    while ((m = re.exec(text)) !== null)
+      splits.push({ num: parseInt(m[1]), contentStart: m.index + m[0].length });
+    const seq = consecutiveRun(splits);
+    if (seq.length >= 5) {
+      const qs = processChunks(seq);
+      if (qs.length > bestResult.length) bestResult = qs;
+    }
+  }
+  if (bestResult.length >= 5) return bestResult;
+
+  // ── Strategy B: Ratio-anchored (fallback for unnumbered Quizlet-style PDFs) ─
   const ratioRE = /\b([A-E](?:[,\s]+[A-E])*)\.?\s+Ratio\w{1,7}\s*:/gi;
   const ratioMarkers = [];
   let am;
   while ((am = ratioRE.exec(text)) !== null)
     ratioMarkers.push({ idx: am.index, letters: am[1].replace(/[\s,]+/g,'').toUpperCase(), len: am[0].length });
 
-  const qs1 = [];
+  const qsB = [];
   for (let mi = 0; mi < ratioMarkers.length; mi++) {
     const mk = ratioMarkers[mi];
     const prevEnd = mi > 0 ? ratioMarkers[mi-1].idx + ratioMarkers[mi-1].len : 0;
-    const block = cleanBlock(text.slice(prevEnd, mk.idx));
-    const choiceStart = findLastChoiceStart(block);
+    const block = cleanChunk(text.slice(prevEnd, mk.idx));
+    const choiceStart = findChoiceStart(block);
     if (choiceStart < 0) continue;
     const cm = extractChoices(block.slice(choiceStart));
     if (!cm) continue;
     const preChoices = block.slice(0, choiceStart);
     const lastQ = preChoices.lastIndexOf('?');
-    let qText = (lastQ >= 0 ? preChoices.slice(Math.max(0, lastQ - 900), lastQ + 1) : preChoices).trim();
-    qText = qText.replace(/^\d+[).]\s*/, '');
+    let qText = (lastQ >= 0 ? preChoices.slice(Math.max(0, lastQ - 1000), lastQ + 1) : preChoices).trim();
+    qText = qText.replace(/^\d+[).]\s*/, '').trim();
     if (qText.length < 10) continue;
     const choices = [
       { letter:'A', text: cm[1].trim() }, { letter:'B', text: cm[2].trim() },
-      { letter:'C', text: cm[3].trim() }, { letter:'D', text: cm[4].trim() }
+      { letter:'C', text: cm[3].trim() }, { letter:'D', text: cm[4].trim() },
     ];
     if (cm[5]) choices.push({ letter:'E', text: cm[5].trim() });
-    const nextMk = ratioMarkers[mi+1];
+    const nextMk = ratioMarkers[mi + 1];
     const ratEnd = nextMk ? nextMk.idx : Math.min(text.length, mk.idx + mk.len + 500);
-    const rationale = cleanBlock(text.slice(mk.idx + mk.len, ratEnd)).slice(0, 450);
-    qs1.push({ exam:'Exam', num: qs1.length+1, question: qText, choices,
-      answer: buildAnswerText(mk.letters, choices), explanation: rationale });
+    const rationale = cleanChunk(text.slice(mk.idx + mk.len, ratEnd)).slice(0, 450);
+    qsB.push({ exam:'Exam', num: qsB.length + 1, question: qText, choices,
+      answer: buildAnswer(mk.letters, choices), explanation: rationale });
   }
-
-  // ── Strategy 2: Question-number anchored ("1) … 2) …") ────────────────────
-  // Split text at each "N) " marker; within each chunk find answer + choices.
-  const numRE = /(?:^|\n)[ \t]*(\d{1,3})[)] /gm;
-  const splits = [];
-  let nm;
-  while ((nm = numRE.exec(text)) !== null)
-    splits.push({ num: parseInt(nm[1]), contentStart: nm.index + nm[0].length });
-
-  const qs2 = [];
-  if (splits.length >= 5) {
-    // Find where a consecutive run of 1,2,3,… starts
-    let runStart = -1;
-    for (let i = 0; i < splits.length - 1; i++) {
-      if (splits[i].num === 1 && splits[i+1].num === 2) { runStart = i; break; }
-    }
-    if (runStart < 0) runStart = 0;
-
-    // Collect a clean consecutive run
-    const seq = [splits[runStart]];
-    for (let i = runStart + 1; i < splits.length && seq.length < 300; i++) {
-      if (splits[i].num === seq[seq.length-1].num + 1) seq.push(splits[i]);
-      else if (splits[i].num > seq[seq.length-1].num + 1) break; // gap in numbering
-    }
-
-    if (seq.length >= 5) {
-      // Answer marker within a chunk: "X Ratio..." OR (Correct) Answer: X
-      // Require Answer to be preceded by whitespace or start-of-line to avoid matching inside choice text
-      const chunkAnsRE = /\b([A-E](?:[,\s]+[A-E])*)\.?\s+Ratio\w{1,7}\s*:|\n[ \t]*(?:Correct\s+)?Answer\s*[:\-]\s*([A-E](?:[,\s]+[A-E])*)/i;
-
-      for (let si = 0; si < seq.length; si++) {
-        const chunkStart = seq[si].contentStart;
-        const chunkEnd = si+1 < seq.length
-          ? text.lastIndexOf('\n', seq[si+1].contentStart - 2) + 1 || seq[si+1].contentStart
-          : text.length;
-        const chunk = cleanBlock(text.slice(chunkStart, chunkEnd));
-
-        // Find the answer marker inside this chunk
-        const ansM = chunkAnsRE.exec(chunk);
-        if (!ansM) continue;
-        const ansLetters = (ansM[1] || ansM[2]).replace(/[\s,]+/g,'').toUpperCase();
-
-        // Choices are before the answer marker
-        const preAns = chunk.slice(0, ansM.index);
-        const choiceStart = findLastChoiceStart(preAns);
-        if (choiceStart < 0) continue;
-        const cm = extractChoices(preAns.slice(choiceStart));
-        if (!cm) continue;
-
-        const preChoices = preAns.slice(0, choiceStart);
-        const lastQ = preChoices.lastIndexOf('?');
-        let qText = (lastQ >= 0 ? preChoices.slice(Math.max(0, lastQ - 900), lastQ + 1) : preChoices).trim();
-        qText = qText.replace(/^\d+[).]\s*/, '');
-        if (qText.length < 10) continue;
-
-        const choices = [
-          { letter:'A', text: cm[1].trim() }, { letter:'B', text: cm[2].trim() },
-          { letter:'C', text: cm[3].trim() }, { letter:'D', text: cm[4].trim() }
-        ];
-        if (cm[5]) choices.push({ letter:'E', text: cm[5].trim() });
-
-        // Rationale: everything after the answer marker's "Ratio..." colon
-        const afterAns = chunk.slice(ansM.index + ansM[0].length);
-        const ratM = /Ratio\w{1,7}\s*:/i.exec(afterAns);
-        const rationale = ratM ? afterAns.slice(ratM.index + ratM[0].length, ratM.index + 451).trim()
-                                : afterAns.slice(0, 450).trim();
-
-        qs2.push({ exam:'Exam', num: qs2.length+1, question: qText, choices,
-          answer: buildAnswerText(ansLetters, choices), explanation: rationale });
-      }
-    }
-  }
-
-  const result = qs2.length > qs1.length ? qs2 : qs1;
-  return result.length > 3 ? result : null;
+  return qsB.length > 3 ? qsB : null;
 }
 
 function parseTxt(raw) {
