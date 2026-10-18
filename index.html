@@ -2244,7 +2244,8 @@ function parseGeneralPdf(raw) {
   // This works even when page breaks split the choice list, because we look at
   // the full continuous text rather than inter-marker segments.
   // Handles both "A.\ntext" and "A. text" formats, answer as "B\nRatio" or "B Ratio"
-  const cbRE = /(?:^|\n)A\s?\.[ \t]*([\s\S]+?)[ \t]*\nB\s?\.[ \t]*([\s\S]+?)[ \t]*\nC\s?\.[ \t]*([\s\S]+?)[ \t]*\nD\s?\.[ \t]*([\s\S]+?)[ \t]*\n([A-E](?:[, \t]*[A-E])*)[ \t]*[\n ](?:Ratio|Explan)/gm;
+  // Allow leading whitespace before A/B/C/D; allow empty choice D (malformed PDFs)
+  const cbRE = /(?:^|\n)[ \t]*A\s?\.[ \t]*([\s\S]+?)[ \t]*\n[ \t]*B\s?\.[ \t]*([\s\S]+?)[ \t]*\n[ \t]*C\s?\.[ \t]*([\s\S]+?)[ \t]*\n[ \t]*D\s?\.[ \t]*([\s\S]*?)[ \t]*\n([A-E](?:[, \t]*[A-E])*)[ \t]*[\n ](?:Ratio|Explan)/gm;
   const qsC = [];
   const seenQ = new Set();
   let cm2;
