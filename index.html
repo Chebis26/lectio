@@ -2050,13 +2050,18 @@ function parseGeneralPdf(raw) {
   // Strip common PDF title/boilerplate that appears at the top
   text = text.replace(/HESI\s+RN\s+\w[\s\S]{0,200}?(?:VERIFIED\s+AN(?:-?\s*SWERS?)?)\s*/gi, '');
 
-  // Anchor on "[A-E][,A-E]* [.]? Rationale:" — single or SATA answer before Rationale
-  // Broad Ratio\w+ matches misspellings: "Rationale", "Ratioanle", "Ratioanles", "Rational"
-  const ansRE = /\b([A-E](?:[,\s]+[A-E])*)\.?\s+Ratio\w{1,7}\s*:/gi;
+  // Anchor on two formats:
+  // Type 1: "[A-E] Ratio...:" — answer letter BEFORE rationale keyword
+  //   matches "C Ratioanle:", "B, C Rationale:", etc.
+  // Type 2: "(Correct) Answer: [A-E]" — answer letter AFTER keyword
+  //   matches "Answer: C", "Correct Answer: B, C", etc.
+  const markerRE = /\b([A-E](?:[,\s]+[A-E])*)\.?\s+Ratio\w{1,7}\s*:|(?:Correct\s+)?Answer\s*:\s*([A-E](?:[,\s]+[A-E])*)/gi;
   const markers = [];
   let am;
-  while ((am = ansRE.exec(text)) !== null)
-    markers.push({ idx: am.index, letters: am[1].replace(/[\s,]+/g,'').toUpperCase(), len: am[0].length });
+  while ((am = markerRE.exec(text)) !== null) {
+    const letters = (am[1] || am[2]).replace(/[\s,]+/g,'').toUpperCase();
+    markers.push({ idx: am.index, letters, len: am[0].length });
+  }
   if (markers.length < 3) return null;
 
   // Find the start of the LAST A→B→C→D(→E) sequence in a block
@@ -2096,9 +2101,11 @@ function parseGeneralPdf(raw) {
 
     const preChoices = block.slice(0, choiceStart);
     const lastQ = preChoices.lastIndexOf('?');
-    const questionText = (lastQ >= 0
-      ? preChoices.slice(Math.max(0, lastQ - 700), lastQ + 1)
+    let questionText = (lastQ >= 0
+      ? preChoices.slice(Math.max(0, lastQ - 900), lastQ + 1)
       : preChoices).trim();
+    // Strip leading question number like "1)" or "12." left by slice boundary
+    questionText = questionText.replace(/^\d+[).]\s*/, '');
     if (questionText.length < 10) continue;
 
     const choices = [
@@ -2126,9 +2133,6 @@ function parseGeneralPdf(raw) {
       answer: ansText,
       explanation: rationale
     });
-  }
-  if (qs.length > 3 && qs[0]) {
-    qs[0].question = '[DBG markers=' + markers.length + ' found=' + qs.length + '] ' + qs[0].question;
   }
   return qs.length > 3 ? qs : null;
 }
