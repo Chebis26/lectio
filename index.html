@@ -2243,9 +2243,9 @@ function parseGeneralPdf(raw) {
   // Scan the whole text for A. → B. → C. → D. → [answer letter] → Rationale
   // This works even when page breaks split the choice list, because we look at
   // the full continuous text rather than inter-marker segments.
-  // Handles both "A.\ntext" and "A. text" formats, answer as "B\nRatio" or "B Ratio"
-  // Allow leading whitespace before A/B/C/D; allow empty choice D (malformed PDFs)
-  const cbRE = /(?:^|\n)[ \t]*A\s?\.[ \t]*([\s\S]+?)[ \t]*\n[ \t]*B\s?\.[ \t]*([\s\S]+?)[ \t]*\n[ \t]*C\s?\.[ \t]*([\s\S]+?)[ \t]*\n[ \t]*D\s?\.[ \t]*([\s\S]*?)[ \t]*\n([A-E](?:[, \t]*[A-E])*)[ \t]*[\n ](?:Ratio|Explan)/gm;
+  // Cap each choice at 400 chars to prevent overrun across page-break questions.
+  // Explicit \n before answer letter; \s+ handles "B\nRatio" and "B Ratio".
+  const cbRE = /(?:^|\n)[ \t]*A\s?\.[ \t]*([\s\S]{1,400}?)[ \t]*\n[ \t]*B\s?\.[ \t]*([\s\S]{1,400}?)[ \t]*\n[ \t]*C\s?\.[ \t]*([\s\S]{1,400}?)[ \t]*\n[ \t]*D\s?\.[ \t]*([\s\S]{0,400}?)\n([A-E](?:[, \t]*[A-E])*)\s+(?:Ratio|Explan)/gm;
   const qsC = [];
   const seenQ = new Set();
   let cm2;
@@ -2265,7 +2265,11 @@ function parseGeneralPdf(raw) {
     qsC.push({ exam:'Exam', num: qsC.length + 1, question: qText, choices,
       answer: buildAnswer(ansLetter, choices), explanation: '' });
   }
-  return qsC.length > qsB.length ? qsC : (qsB.length > 3 ? qsB : null);
+  // Merge: qsC as base; add qsB entries whose question text isn't already in qsC
+  const cKeys = new Set(qsC.map(q => q.question.trim().toLowerCase().replace(/\s+/g,' ').slice(0,80)));
+  const extra = qsB.filter(q => !cKeys.has(q.question.trim().toLowerCase().replace(/\s+/g,' ').slice(0,80)));
+  const merged = [...qsC, ...extra].map((q, i) => ({ ...q, num: i + 1 }));
+  return merged.length > 3 ? merged : (qsB.length > 3 ? qsB : null);
 }
 
 function parseTxt(raw) {
