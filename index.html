@@ -2239,7 +2239,32 @@ function parseGeneralPdf(raw) {
     qsB.push({ exam:'Exam', num: qsB.length + 1, question: qText, choices,
       answer: buildAnswer(mk.letters, choices), explanation: rationale });
   }
-  return qsB.length > 3 ? qsB : null;
+  // ── Strategy C: Choice-block scanner ────────────────────────────────────────
+  // Scan the whole text for A. → B. → C. → D. → [answer letter] → Rationale
+  // This works even when page breaks split the choice list, because we look at
+  // the full continuous text rather than inter-marker segments.
+  // Handles both "A.\ntext" and "A. text" formats, answer as "B\nRatio" or "B Ratio"
+  const cbRE = /(?:^|\n)A\s?\.[ \t]*([\s\S]+?)[ \t]*\nB\s?\.[ \t]*([\s\S]+?)[ \t]*\nC\s?\.[ \t]*([\s\S]+?)[ \t]*\nD\s?\.[ \t]*([\s\S]+?)[ \t]*\n([A-E](?:[, \t]*[A-E])*)[ \t]*[\n ](?:Ratio|Explan)/gm;
+  const qsC = [];
+  const seenQ = new Set();
+  let cm2;
+  while ((cm2 = cbRE.exec(text)) !== null) {
+    const [, rawA, rawB, rawC, rawD, ansLetter] = cm2;
+    const blockStart = cm2.index;
+    const before = text.slice(Math.max(0, blockStart - 1000), blockStart);
+    const qText = extractQuestionText(before);
+    if (qText.length < 10) continue;
+    const key = qText.trim().toLowerCase().replace(/\s+/g, ' ');
+    if (seenQ.has(key)) continue;
+    seenQ.add(key);
+    const choices = [
+      { letter:'A', text: rawA.trim() }, { letter:'B', text: rawB.trim() },
+      { letter:'C', text: rawC.trim() }, { letter:'D', text: rawD.trim() },
+    ];
+    qsC.push({ exam:'Exam', num: qsC.length + 1, question: qText, choices,
+      answer: buildAnswer(ansLetter, choices), explanation: '' });
+  }
+  return qsC.length > qsB.length ? qsC : (qsB.length > 3 ? qsB : null);
 }
 
 function parseTxt(raw) {
