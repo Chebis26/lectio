@@ -2044,7 +2044,10 @@ function parseHesiPdf(raw) {
 // Strategy A: split by question numbers (N) / N. / Question N) — most reliable.
 // Strategy B: fallback Ratio-anchored (for Quizlet-style PDFs without numbering).
 function parseGeneralPdf(raw) {
-  let text = raw.replace(/(\w)-[ \t]+(\w)/g, '$1$2'); // fix PDF hyphenation
+  // Normalize Unicode: decompose combined chars, strip combining diacritics.
+  // Fixes PDFs with font-encoding substitutions (e.g. ḍ for d, Ḍ for D).
+  let text = raw.normalize('NFKD').replace(/[̀-ͯ᷀-᷿⃐-⃿]/g, '');
+  text = text.replace(/(\w)-[ \t]+(\w)/g, '$1$2'); // fix PDF hyphenation
   text = text.replace(/\r\n/g, '\n');
   text = text.replace(/Study online at[^.\n]+[.\n]/gi, ' ');
   text = text.replace(/https?:\/\/\S+/g, ' ');
@@ -2052,15 +2055,15 @@ function parseGeneralPdf(raw) {
   // ── Shared helpers ──────────────────────────────────────────────────────────
 
   // Find the last A→B→C→D start position in a block.
-  // Supports "A." "A)" and "(A)" choice formats.
+  // Supports "A." "A)" "(A)" and "A ." (space before separator, from font-encoding PDFs).
   function findChoiceStart(block) {
-    const aPat = /\b(?:A[.)]\s+[A-Z\d(]|\(A\)\s+[A-Z])/g;
+    const aPat = /\bA\s?[.)]\s+[A-Z\d(]|\(A\)\s+[A-Z]/g;
     const aPos = [];
     let m;
     while ((m = aPat.exec(block)) !== null) aPos.push(m.index);
     for (let ai = aPos.length - 1; ai >= 0; ai--) {
       const sub = block.slice(aPos[ai]);
-      if (/\bA[.)]\s+[\s\S]+?\bB[.)]\s+[\s\S]+?\bC[.)]\s+[\s\S]+?\bD[.)]\s+/.test(sub) ||
+      if (/\bA\s?[.)]\s+[\s\S]+?\bB\s?[.)]\s+[\s\S]+?\bC\s?[.)]\s+[\s\S]+?\bD\s?[.)]\s+/.test(sub) ||
           /\(A\)\s+[\s\S]+?\(B\)\s+[\s\S]+?\(C\)\s+[\s\S]+?\(D\)\s+/.test(sub))
         return aPos[ai];
     }
@@ -2070,7 +2073,7 @@ function parseGeneralPdf(raw) {
   // Extract A-D (+optional E) choices from a bounded block (no trailing $)
   function extractChoices(block) {
     return (
-      /\bA[.)]\s+([\s\S]+?)\s+\bB[.)]\s+([\s\S]+?)\s+\bC[.)]\s+([\s\S]+?)\s+\bD[.)]\s+([\s\S]+?)(?:\s+\bE[.)]\s+([\s\S]+?))?\s*$/.exec(block) ||
+      /\bA\s?[.)]\s+([\s\S]+?)\s+\bB\s?[.)]\s+([\s\S]+?)\s+\bC\s?[.)]\s+([\s\S]+?)\s+\bD\s?[.)]\s+([\s\S]+?)(?:\s+\bE\s?[.)]\s+([\s\S]+?))?\s*$/.exec(block) ||
       /\(A\)\s+([\s\S]+?)\s+\(B\)\s+([\s\S]+?)\s+\(C\)\s+([\s\S]+?)\s+\(D\)\s+([\s\S]+?)(?:\s+\(E\)\s+([\s\S]+?))?\s*$/.exec(block)
     );
   }
@@ -2100,8 +2103,25 @@ function parseGeneralPdf(raw) {
   function cleanChunk(s) {
     return s
       .replace(/\d+\s*\/\s*\d+\s+[A-Z][A-Z &\-]+(?:EXAM|QUESTIONS|ANSWERS)[^\n]*/gi, ' ')
+      .replace(/\b\d+\s*\/\s*\d+\b\s*\n/g, '\n')  // strip "N / M" page numbers
       .replace(/\s{3,}/g, '  ')
       .trim();
+  }
+
+  // Extract question text from preChoices, trimming any leading rationale from
+  // a previous question. Quizlet PDFs separate rationale→question with 2+ spaces;
+  // multi-sentence questions within the same card use only 1 space.
+  function extractQuestionText(preChoices) {
+    const lastQ = preChoices.lastIndexOf('?');
+    if (lastQ < 0) return preChoices.trim();
+    const seg = preChoices.slice(0, lastQ);
+    // Strong separator: sentence-ending punct + 2+ spaces + capital, or bare newline + capital
+    const breakRE = /(?:[.!?]\s{2,}|\n\s*)(?=[A-Z])/g;
+    let lastBreakAt = -1;
+    let bm;
+    while ((bm = breakRE.exec(seg)) !== null) lastBreakAt = bm.index + bm[0].length;
+    const qStart = lastBreakAt >= 0 ? lastBreakAt : Math.max(0, lastQ - 1000);
+    return preChoices.slice(qStart, lastQ + 1).replace(/^\d+[).]\s*/, '').trim();
   }
 
   // Find the longest consecutive run in an array of { num } splits (starting ≤ 5)
@@ -2141,9 +2161,7 @@ function parseGeneralPdf(raw) {
       if (!cm) continue;
 
       const preChoices = preAns.slice(0, choiceStart);
-      const lastQ = preChoices.lastIndexOf('?');
-      let qText = (lastQ >= 0 ? preChoices.slice(Math.max(0, lastQ - 1000), lastQ + 1) : preChoices).trim();
-      qText = qText.replace(/^\d+[).]\s*/, '').trim();
+      const qText = extractQuestionText(preChoices);
       if (qText.length < 10) continue;
 
       const choices = [
@@ -2166,6 +2184,7 @@ function parseGeneralPdf(raw) {
 
   // ── Strategy A: Question-number splitting ──────────────────────────────────
   const numPatterns = [
+    /(?:^|\n)QUESTION\s+(\d{1,3})(?=\s|$)/gim,          // "QUESTION N" explicit
     /(?:^|\n)[ \t]*(\d{1,3})[)]\s+/gm,
     /(?:^|\n)[ \t]*(\d{1,3})[.]\s+(?=[A-Z\(])/gm,
     /(?:^|\n)[ \t]*(?:Q(?:uestion)?\s*)(\d{1,3})[.):\s]/gmi,
@@ -2203,9 +2222,7 @@ function parseGeneralPdf(raw) {
     const cm = extractChoices(block.slice(choiceStart));
     if (!cm) continue;
     const preChoices = block.slice(0, choiceStart);
-    const lastQ = preChoices.lastIndexOf('?');
-    let qText = (lastQ >= 0 ? preChoices.slice(Math.max(0, lastQ - 1000), lastQ + 1) : preChoices).trim();
-    qText = qText.replace(/^\d+[).]\s*/, '').trim();
+    const qText = extractQuestionText(preChoices);
     if (qText.length < 10) continue;
     const choices = [
       { letter:'A', text: cm[1].trim() }, { letter:'B', text: cm[2].trim() },
