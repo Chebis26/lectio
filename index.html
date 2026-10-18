@@ -2216,8 +2216,12 @@ function parseGeneralPdf(raw) {
   for (let mi = 0; mi < ratioMarkers.length; mi++) {
     const mk = ratioMarkers[mi];
     const prevEnd = mi > 0 ? ratioMarkers[mi-1].idx + ratioMarkers[mi-1].len : 0;
-    const block = cleanChunk(text.slice(prevEnd, mk.idx));
-    const choiceStart = findChoiceStart(block);
+    let block = cleanChunk(text.slice(prevEnd, mk.idx));
+    let choiceStart = findChoiceStart(block);
+
+    // Fallback: Quizlet PDFs sometimes have choices B/C/D after the answer+rationale
+    // due to page breaks. Extend the search window into the post-marker text.
+
     if (choiceStart < 0) continue;
     const cm = extractChoices(block.slice(choiceStart));
     if (!cm) continue;
